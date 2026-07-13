@@ -24,8 +24,9 @@ def load_accounts():
     if os.path.exists(ACCOUNTS_FILE):
         with open(ACCOUNTS_FILE, 'r') as f:
             data = json.load(f)
-            # Handle both list and dict formats
-            if isinstance(data, list):
+            if isinstance(data, dict):
+                return data
+            elif isinstance(data, list):
                 accounts = {}
                 for item in data:
                     if isinstance(item, dict) and 'uid' in item and 'password' in item:
@@ -33,8 +34,6 @@ def load_accounts():
                     elif isinstance(item, list) and len(item) >= 2:
                         accounts[str(item[0])] = item[1]
                 return accounts
-            elif isinstance(data, dict):
-                return data
     return {}
 
 # ✅ Load tokens from tokens.json
@@ -49,55 +48,98 @@ def save_tokens(tokens_data):
     with open(TOKENS_FILE, 'w') as f:
         json.dump(tokens_data, f, indent=2)
 
+# ✅ Fetch token from API - Updated for new response format
+async def fetch_token(session, uid, password):
+    url = f"https://jwtmc.vercel.app/token?uid={uid}&password={password}"
+    try:
+        async with session.get(url, timeout=15) as res:
+            if res.status == 200:
+                text = await res.text()
+                try:
+                    data = json.loads(text)
+                    
+                    # Check if success is true and token exists
+                    if data.get('success') == True:
+                        if 'token' in data:
+                            return data['token']
+                        elif 'data' in data and 'token' in data['data']:
+                            return data['data']['token']
+                    
+                    # Handle list response format
+                    if isinstance(data, list) and len(data) > 0:
+                        if "token" in data[0]:
+                            return data[0]["token"]
+                        elif "Token" in data[0]:
+                            return data[0]["Token"]
+                    
+                    # Handle dict response format
+                    elif isinstance(data, dict):
+                        if "token" in data:
+                            return data["token"]
+                        elif "Token" in data:
+                            return data["Token"]
+                        elif "data" in data and isinstance(data["data"], dict):
+                            if "token" in data["data"]:
+                                return data["data"]["token"]
+                    
+                    return None
+                    
+                except json.JSONDecodeError:
+                    # If response is plain text, might be token directly
+                    if len(text) > 50:
+                        return text
+                    return None
+            else:
+                print(f"❌ API Error for UID {uid}: Status {res.status}")
+                return None
+                
+    except asyncio.TimeoutError:
+        print(f"⏰ Timeout for UID {uid}")
+        return None
+    except Exception as e:
+        print(f"❌ Error fetching token for UID {uid}: {str(e)}")
+        return None
+
 # ✅ Generate tokens for specific accounts
 async def generate_tokens_for_accounts(account_slice):
     tokens = []
     async with aiohttp.ClientSession() as session:
         tasks = []
+        uids = []
         for uid, password in account_slice.items():
             tasks.append(fetch_token(session, uid, password))
-        results = await asyncio.gather(*tasks)
+            uids.append(uid)
         
-        uids = list(account_slice.keys())
-        for i, token in enumerate(results):
-            if token:
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                print(f"❌ Error for UID {uids[i]}: {str(result)}")
+                continue
+            if result:
                 tokens.append({
                     'uid': uids[i],
-                    'token': token,
+                    'token': result,
                     'created_at': datetime.now().isoformat(),
                     'request_count': 0
                 })
+                print(f"✅ Token generated for UID: {uids[i]}")
+            else:
+                print(f"❌ Failed to generate token for UID: {uids[i]}")
+    
     return tokens
-
-# ✅ Fetch token from API
-async def fetch_token(session, uid, password):
-    url = f"https://jwtmc.vercel.app/token?uid={uid}&password={password}"
-    try:
-        async with session.get(url, timeout=10) as res:
-            if res.status == 200:
-                text = await res.text()
-                try:
-                    data = json.loads(text)
-                    if isinstance(data, list) and len(data) > 0 and "token" in data[0]:
-                        return data[0]["token"]
-                    elif isinstance(data, dict) and "token" in data:
-                        return data["token"]
-                except:
-                    return None
-    except:
-        return None
-    return None
 
 # ✅ Get next batch of tokens (rotation logic)
 def get_next_token_batch(tokens_data, accounts):
     current_time = datetime.now()
     
-    # If no accounts, return empty
     if not accounts:
+        print("❌ No accounts available")
         return []
     
     # If no tokens or empty tokens, generate fresh
     if not tokens_data or not tokens_data.get('tokens'):
+        print("🔄 Generating fresh tokens...")
         return generate_fresh_tokens(accounts)
     
     # Get current tokens
@@ -106,11 +148,15 @@ def get_next_token_batch(tokens_data, accounts):
     # Check if any token needs refresh
     needs_refresh = False
     for token_info in current_tokens:
-        created_time = datetime.fromisoformat(token_info['created_at'])
-        time_diff = current_time - created_time
-        
-        # Check time limit or request count
-        if time_diff > timedelta(hours=TIME_LIMIT_HOURS) or token_info.get('request_count', 0) >= REQUEST_LIMIT:
+        try:
+            created_time = datetime.fromisoformat(token_info['created_at'])
+            time_diff = current_time - created_time
+            
+            if time_diff > timedelta(hours=TIME_LIMIT_HOURS) or token_info.get('request_count', 0) >= REQUEST_LIMIT:
+                needs_refresh = True
+                print(f"🔄 Token refresh needed for UID {token_info['uid']} (Requests: {token_info.get('request_count', 0)})")
+                break
+        except:
             needs_refresh = True
             break
     
@@ -119,9 +165,10 @@ def get_next_token_batch(tokens_data, accounts):
         used_accounts = [t['uid'] for t in current_tokens]
         available_accounts = [uid for uid in accounts.keys() if uid not in used_accounts]
         
+        print(f"📊 Used accounts: {len(used_accounts)}, Available: {len(available_accounts)}")
+        
         # Get accounts for next batch
         if len(available_accounts) >= TOKENS_PER_BATCH:
-            # Take next batch
             next_batch = {uid: accounts[uid] for uid in available_accounts[:TOKENS_PER_BATCH]}
         else:
             # Not enough new accounts, start from beginning
@@ -139,11 +186,11 @@ def get_next_token_batch(tokens_data, accounts):
                     uid, pwd = account_list[i]
                     next_batch[uid] = pwd
                 else:
-                    # If still not enough, start from beginning again
                     idx = i % len(account_list)
                     uid, pwd = account_list[idx]
                     next_batch[uid] = pwd
         
+        print(f"🔄 Generating new batch with {len(next_batch)} accounts...")
         return generate_fresh_tokens(next_batch)
     
     return current_tokens
@@ -151,14 +198,22 @@ def get_next_token_batch(tokens_data, accounts):
 # ✅ Generate fresh tokens for given accounts
 def generate_fresh_tokens(account_slice):
     if not account_slice:
+        print("❌ No accounts in slice")
         return []
     
+    print(f"🔄 Generating tokens for {len(account_slice)} accounts...")
     new_tokens = asyncio.run(generate_tokens_for_accounts(account_slice))
+    
+    if not new_tokens:
+        print("❌ No tokens generated!")
+        return []
+    
     tokens_data = {
         'tokens': new_tokens,
         'last_updated': datetime.now().isoformat()
     }
     save_tokens(tokens_data)
+    print(f"✅ Saved {len(new_tokens)} tokens to tokens.json")
     return new_tokens
 
 # ✅ Encrypt message
@@ -203,9 +258,10 @@ def make_request(enc_uid, token):
         'ReleaseVersion': "OB54"
     }
     try:
-        res = requests.post(url, data=bytes.fromhex(enc_uid), headers=headers, verify=False)
+        res = requests.post(url, data=bytes.fromhex(enc_uid), headers=headers, verify=False, timeout=10)
         return decode_protobuf(res.content)
-    except:
+    except Exception as e:
+        print(f"❌ Make request error: {e}")
         return None
 
 # ✅ Send like request
@@ -224,10 +280,10 @@ async def send_request(enc_uid, token):
     }
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(url, data=bytes.fromhex(enc_uid), headers=headers, ssl=False) as r:
+            async with session.post(url, data=bytes.fromhex(enc_uid), headers=headers, ssl=False, timeout=10) as r:
                 return r.status
     except Exception as e:
-        print(f"Error in send_request: {e}")
+        print(f"❌ Send request error: {e}")
         return None
 
 # ✅ Send likes with token management
@@ -239,17 +295,19 @@ async def send_likes_with_token_management(uid, tokens):
         token = token_info['token']
         tasks.append(send_request(enc_uid, token))
     
-    results = await asyncio.gather(*tasks)
+    results = await asyncio.gather(*tasks, return_exceptions=True)
     
     # Update request count for tokens
     tokens_data = load_tokens()
     if tokens_data and 'tokens' in tokens_data:
         for i, token_info in enumerate(tokens_data['tokens']):
-            if i < len(results):
+            if i < len(results) and isinstance(results[i], int):
                 token_info['request_count'] = token_info.get('request_count', 0) + 1
         save_tokens(tokens_data)
     
-    return results
+    # Count successful requests
+    success_count = sum(1 for r in results if r == 200)
+    return results, success_count
 
 # ✅ Main like endpoint
 @app.route('/like', methods=['GET'])
@@ -259,17 +317,24 @@ def like_handler():
         return jsonify({"error": "Missing UID"}), 400
     
     try:
+        print(f"📥 Received request for UID: {uid}")
+        
         # Load accounts and tokens
         accounts = load_accounts()
         if not accounts:
+            print("❌ No accounts available")
             return jsonify({"error": "No accounts available"}), 401
         
+        print(f"📊 Total accounts: {len(accounts)}")
         tokens_data = load_tokens()
         
         # Get or refresh tokens
         tokens = get_next_token_batch(tokens_data, accounts)
         if not tokens:
+            print("❌ Failed to generate tokens")
             return jsonify({"error": "Failed to generate tokens"}), 401
+        
+        print(f"✅ Using {len(tokens)} tokens")
         
         # Get first token for checking player info
         first_token = tokens[0]['token']
@@ -284,9 +349,12 @@ def like_handler():
         likes_before = int(before_data.get("AccountInfo", {}).get("Likes", 0))
         nickname = before_data.get("AccountInfo", {}).get("PlayerNickname", "Unknown")
         
+        print(f"👤 Player: {nickname}, Likes before: {likes_before}")
+        
         # Send likes
-        responses = asyncio.run(send_likes_with_token_management(uid, tokens))
-        success_count = sum(1 for r in responses if r == 200)
+        responses, success_count = asyncio.run(send_likes_with_token_management(uid, tokens))
+        
+        print(f"✅ Success rate: {success_count}/{len(tokens)}")
         
         # Get player info after likes
         after = make_request(enc_uid, first_token)
@@ -310,6 +378,7 @@ def like_handler():
         })
     
     except Exception as e:
+        print(f"❌ Error: {str(e)}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 # ✅ Status endpoint
@@ -343,6 +412,35 @@ def status_handler():
     
     return jsonify(response)
 
+# ✅ Test token endpoint
+@app.route('/test/<uid>', methods=['GET'])
+def test_token(uid):
+    accounts = load_accounts()
+    if uid not in accounts:
+        return jsonify({"error": "UID not found in accounts"}), 404
+    
+    password = accounts[uid]
+    
+    async def test():
+        async with aiohttp.ClientSession() as session:
+            token = await fetch_token(session, uid, password)
+            return token
+    
+    token = asyncio.run(test())
+    if token:
+        return jsonify({
+            "success": True,
+            "uid": uid,
+            "token": token[:50] + "...",  # Show partial token
+            "full_token": token
+        })
+    else:
+        return jsonify({
+            "success": False,
+            "uid": uid,
+            "message": "Failed to get token"
+        }), 400
+
 # ✅ Home endpoint
 @app.route('/')
 def home():
@@ -351,7 +449,8 @@ def home():
         "message": "Like API is running ✅",
         "endpoints": {
             "/like?uid=YOUR_UID": "Send likes to player",
-            "/status": "Check token status"
+            "/status": "Check token status",
+            "/test/UID": "Test token generation for specific UID"
         },
         "token_rotation": f"{TOKENS_PER_BATCH} tokens per batch, refresh after {REQUEST_LIMIT} requests or {TIME_LIMIT_HOURS} hour",
         "total_accounts": len(load_accounts())
@@ -359,4 +458,4 @@ def home():
 
 # ✅ Local development
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=3000)
+    app.run(host='0.0.0.0', port=3000, debug=True)
