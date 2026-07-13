@@ -1,101 +1,113 @@
+#GHUMMMMMMM...A
+#JOIN CHANNEL  https://t.me/bloodbrx98
+
+
 from flask import Flask, request, jsonify
-import json, os, aiohttp, asyncio, requests, binascii, time
-from datetime import datetime
+import json, os, aiohttp, asyncio, requests, binascii, time, threading
+from datetime import datetime, timedelta
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad
 from google.protobuf.json_format import MessageToJson
 import like_pb2, like_count_pb2, uid_generator_pb2
 from google.protobuf.message import DecodeError
-from threading import Lock
 
 app = Flask(__name__)
 
 ACCOUNTS_FILE = 'accounts.json'
-BATCH_SIZE = 20
-MAX_REQUESTS_PER_BATCH = 30
-BATCH_EXPIRY_HOURS = 2
+BATCH_SIZE = 21  # Har baar kitne accounts se token lena hai
+CACHE_DURATION = 3600  # 1 hour
 
-token_manager = {
-    'current_batch_tokens': [],
-    'current_batch_accounts': [],
-    'current_batch_index': 0,
-    'batch_start_index': 0,
-    'request_count': 0,
-    'batch_created_at': None,
-    'total_accounts': 0,
-    'all_accounts': [],
-    'lock': Lock(),
-    'is_generating': False  # 🔥 Generation lock
-}
-
-# ✅ Load accounts from file
-def load_accounts():
-    try:
+# ✅ In-Memory Cache (Vercel compatible)
+class MemoryCache:
+    def __init__(self):
+        self.tokens = []
+        self.batch_info = {}
+        self.timestamp = 0
+        self.expiry = 0
+        self.current_index = 0
+        self.all_accounts = []
+        self.is_initialized = False
+        self.total_cycles = 0  # Kitni baar complete cycle hui
+        self.last_batch_was_partial = False  # Last batch partial thi?
+    
+    def is_valid(self):
+        return self.is_initialized and time.time() < self.expiry and len(self.tokens) > 0
+    
+    def set_cache(self, tokens, batch_info):
+        self.tokens = tokens
+        self.batch_info = batch_info
+        self.timestamp = time.time()
+        self.expiry = time.time() + CACHE_DURATION
+        self.is_initialized = True
+    
+    def get_cache(self):
+        if self.is_valid():
+            return self.tokens, self.batch_info
+        return None, None
+    
+    def update_index(self, index):
+        self.current_index = index
+    
+    def load_accounts(self):
         if os.path.exists(ACCOUNTS_FILE):
-            with open(ACCOUNTS_FILE, 'r', encoding='utf-8') as f:
+            with open(ACCOUNTS_FILE, 'r') as f:
                 accounts = json.load(f)
-                token_manager['all_accounts'] = list(accounts.items())
-                token_manager['total_accounts'] = len(token_manager['all_accounts'])
-                print(f"✅ Loaded {len(accounts)} accounts from {ACCOUNTS_FILE}")
-                return accounts
-        else:
-            print(f"❌ {ACCOUNTS_FILE} not found!")
-            return {}
-    except Exception as e:
-        print(f"❌ Error loading accounts: {e}")
-        return {}
+                self.all_accounts = list(accounts.items())
+                return self.all_accounts
+        return []
 
-# ✅ Validate token (check if token is valid)
-async def validate_token(token):
-    """Check if token is valid by making a test request"""
-    try:
-        url = "https://client.ind.freefiremobile.com/GetPlayerPersonalShow"
-        headers = {
-            'User-Agent': "Dalvik/2.1.0 (Linux; U; Android 9; ASUS_Z01QD Build/PI)",
-            'Connection': "Keep-Alive",
-            'Accept-Encoding': "gzip",
-            'Authorization': f"Bearer {token}",
-            'Content-Type': "application/x-www-form-urlencoded",
-            'Expect': "100-continue",
-            'X-Unity-Version': "2018.4.11f1",
-            'X-GA': "v1 1",
-            'ReleaseVersion': "OB53"
-        }
-        
-        # Test with a dummy UID (123456789)
-        enc_uid = encrypt_message(create_uid_proto("123456789"))
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, data=bytes.fromhex(enc_uid), headers=headers, ssl=False, timeout=10) as res:
-                if res.status == 200:
-                    return True
-                else:
-                    return False
-    except:
-        return False
+# ✅ Global cache instance
+cache = MemoryCache()
 
-# ✅ Get next batch (Round-Robin)
-def get_next_batch():
-    with token_manager['lock']:
-        all_accounts = token_manager['all_accounts']
-        total = len(all_accounts)
-        
-        if total == 0:
-            return []
-        
-        start = token_manager['batch_start_index']
-        end = start + BATCH_SIZE
-        
-        if end >= total:
-            batch = all_accounts[start:total]
-            token_manager['batch_start_index'] = 0
-        else:
-            batch = all_accounts[start:end]
-            token_manager['batch_start_index'] = end
-        
-        return batch
+# ✅ Load accounts on startup
+def load_accounts():
+    return cache.load_accounts()
 
-# ✅ Fetch token
+# ✅ Get next batch of accounts (with special logic)
+def get_next_account_batch():
+    if not cache.all_accounts:
+        load_accounts()
+    
+    if not cache.all_accounts:
+        return []
+    
+    total_accounts = len(cache.all_accounts)
+    
+    # 🔥 SPECIAL LOGIC: Agar last batch partial thi (16 accounts),
+    # toh agli baar pehle 5 accounts se start karo
+    if cache.last_batch_was_partial:
+        print(f"🔄 Last batch was partial, starting from first 5 accounts")
+        cache.current_index = 0
+        cache.last_batch_was_partial = False
+        cache.total_cycles += 1
+    
+    # Get next 21 accounts
+    start_idx = cache.current_index
+    end_idx = min(start_idx + BATCH_SIZE, total_accounts)
+    batch = cache.all_accounts[start_idx:end_idx]
+    
+    # Check if this is the last batch (partial)
+    if end_idx - start_idx < BATCH_SIZE and end_idx == total_accounts:
+        cache.last_batch_was_partial = True
+        print(f"⚠️ This is the last batch with only {len(batch)} accounts")
+    else:
+        cache.last_batch_was_partial = False
+    
+    # Update index for next time
+    cache.current_index = end_idx
+    
+    # Agar end reach ho gaya, toh reset but keep flag
+    if cache.current_index >= total_accounts:
+        cache.current_index = 0
+        # Last batch thi toh flag already set hai
+        if not cache.last_batch_was_partial:
+            cache.last_batch_was_partial = True
+            cache.total_cycles += 1
+    
+    print(f"📊 Batch: Accounts {start_idx+1} to {end_idx} ({len(batch)} accounts)")
+    return batch
+
+# ✅ Fetch token from API
 async def fetch_token(session, uid, password):
     url = f"https://jwtmc.vercel.app/token?uid={uid}&password={password}"
     try:
@@ -105,122 +117,73 @@ async def fetch_token(session, uid, password):
                 try:
                     data = json.loads(text)
                     if isinstance(data, list) and len(data) > 0 and "token" in data[0]:
-                        token = data[0]["token"]
-                        # ✅ Validate token immediately
-                        if await validate_token(token):
-                            return uid, token, True
-                        else:
-                            return uid, None, False
+                        return data[0]["token"]
                     elif isinstance(data, dict) and "token" in data:
-                        token = data["token"]
-                        if await validate_token(token):
-                            return uid, token, True
-                        else:
-                            return uid, None, False
+                        return data["token"]
                 except:
-                    pass
+                    return None
     except:
-        pass
-    return uid, None, False
+        return None
+    return None
 
-# ✅ Generate batch tokens with auto-retry
-async def generate_batch_tokens(force=False):
-    with token_manager['lock']:
-        if token_manager['is_generating'] and not force:
-            print("⏳ Token generation already in progress...")
-            return token_manager['current_batch_tokens'].copy()
-        token_manager['is_generating'] = True
-    
-    try:
-        batch_accounts = get_next_batch()
-        
-        if not batch_accounts:
-            with token_manager['lock']:
-                token_manager['is_generating'] = False
-            return []
-        
-        print(f"\n🔄 Generating tokens for {len(batch_accounts)} accounts...")
-        
-        tokens = []
-        token_accounts = []
-        
-        async with aiohttp.ClientSession() as session:
-            tasks = [fetch_token(session, uid, pwd) for uid, pwd in batch_accounts]
-            results = await asyncio.gather(*tasks)
-            
-            for uid, token, success in results:
-                if success and token:
-                    tokens.append(token)
-                    token_accounts.append(uid)
-                    print(f"   ✅ {uid}: Token generated & validated")
-                else:
-                    print(f"   ❌ {uid}: Failed or invalid token")
-        
-        # If no tokens generated, try next batch
-        if not tokens:
-            print("⚠️ No valid tokens in this batch, trying next batch...")
-            # Move to next batch
-            with token_manager['lock']:
-                token_manager['batch_start_index'] = (token_manager['batch_start_index'] + BATCH_SIZE) % token_manager['total_accounts']
-            
-            # Retry with next batch
-            return await generate_batch_tokens(force=True)
-        
-        with token_manager['lock']:
-            token_manager['current_batch_tokens'] = tokens
-            token_manager['current_batch_accounts'] = token_accounts
-            token_manager['current_batch_index'] += 1
-            token_manager['request_count'] = 0
-            token_manager['batch_created_at'] = time.time()
-            token_manager['is_generating'] = False
-        
-        print(f"\n✅ Batch complete: {len(tokens)}/{len(batch_accounts)} valid tokens")
-        return tokens
-    
-    except Exception as e:
-        print(f"❌ Error generating batch: {e}")
-        with token_manager['lock']:
-            token_manager['is_generating'] = False
+# ✅ Fetch tokens from current batch
+async def fetch_batch_tokens():
+    batch = get_next_account_batch()
+    if not batch:
         return []
-
-# ✅ Check if need new batch
-def need_new_batch():
-    with token_manager['lock']:
-        # Check if no tokens
-        if not token_manager['current_batch_tokens']:
-            print("⚠️ No tokens available, need new batch")
-            return True
-        
-        # Check request count
-        if token_manager['request_count'] >= MAX_REQUESTS_PER_BATCH:
-            print(f"⏰ Request limit reached: {token_manager['request_count']}/{MAX_REQUESTS_PER_BATCH}")
-            return True
-        
-        # Check time expiry
-        if token_manager['batch_created_at']:
-            age = time.time() - token_manager['batch_created_at']
-            if age >= (BATCH_EXPIRY_HOURS * 3600):
-                print(f"⏰ Batch expired: {age/3600:.1f} hours old")
-                return True
-        
-        return False
-
-# ✅ Get tokens with auto-generation
-async def get_tokens(force_refresh=False):
-    # If force refresh, generate new batch
-    if force_refresh:
-        print("🔄 Force refresh requested")
-        return await generate_batch_tokens(force=True)
     
-    # Check if need new batch
-    if need_new_batch():
-        return await generate_batch_tokens()
+    account_numbers = [uid for uid, _ in batch]
+    print(f"🔄 Fetching tokens for {len(batch)} accounts")
+    print(f"📋 Account UIDs: {account_numbers[:5]}... (showing first 5)")
     
-    # Return cached tokens
-    with token_manager['lock']:
-        token_manager['request_count'] += 1
-        print(f"\n📊 Using cached batch - Request {token_manager['request_count']}/{MAX_REQUESTS_PER_BATCH}")
-        return token_manager['current_batch_tokens'].copy()
+    tokens = []
+    async with aiohttp.ClientSession() as session:
+        tasks = [fetch_token(session, uid, password) for uid, password in batch]
+        results = await asyncio.gather(*tasks)
+        tokens = [token for token in results if token]
+    
+    print(f"✅ Fetched {len(tokens)} valid tokens out of {len(batch)}")
+    return tokens
+
+# ✅ Get tokens (with auto-refresh)
+async def get_tokens_live(force_refresh=False):
+    # Try cache first
+    if not force_refresh:
+        cached_tokens, batch_info = cache.get_cache()
+        if cached_tokens:
+            print(f"✅ Using cached tokens: {len(cached_tokens)} tokens")
+            return cached_tokens
+    
+    # Fetch fresh batch
+    print("🔄 Fetching fresh tokens...")
+    tokens = await fetch_batch_tokens()
+    
+    if tokens:
+        # Calculate current batch info
+        total = len(cache.all_accounts)
+        current_pos = cache.current_index
+        batch_num = (current_pos // BATCH_SIZE) + 1
+        total_batches = (total + BATCH_SIZE - 1) // BATCH_SIZE
+        
+        batch_info = {
+            'batch_number': batch_num,
+            'total_batches': total_batches,
+            'accounts_used': len(tokens),
+            'total_accounts': total,
+            'batch_range': f"{current_pos - len(tokens) + 1}-{current_pos}",
+            'is_partial': cache.last_batch_was_partial,
+            'total_cycles_completed': cache.total_cycles,
+            'timestamp': datetime.now().isoformat()
+        }
+        cache.set_cache(tokens, batch_info)
+        print(f"✅ Fresh tokens cached: {len(tokens)} tokens")
+    else:
+        print("❌ No tokens fetched, using old cache if available")
+        cached_tokens, _ = cache.get_cache()
+        if cached_tokens:
+            return cached_tokens
+    
+    return tokens
 
 # ✅ Encryption functions
 def encrypt_message(plaintext):
@@ -259,13 +222,11 @@ def make_request(enc_uid, token):
         'Expect': "100-continue",
         'X-Unity-Version': "2018.4.11f1",
         'X-GA': "v1 1",
-        'ReleaseVersion': "OB53"
+        'ReleaseVersion': "OB54"
     }
     try:
-        res = requests.post(url, data=bytes.fromhex(enc_uid), headers=headers, verify=False, timeout=10)
-        if res.status == 200:
-            return decode_protobuf(res.content)
-        return None
+        res = requests.post(url, data=bytes.fromhex(enc_uid), headers=headers, verify=False)
+        return decode_protobuf(res.content)
     except:
         return None
 
@@ -280,37 +241,20 @@ async def send_request(enc_uid, token):
         'Expect': "100-continue",
         'X-Unity-Version': "2018.4.11f1",
         'X-GA': "v1 1",
-        'ReleaseVersion': "OB53"
+        'ReleaseVersion': "OB54"
     }
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(url, data=bytes.fromhex(enc_uid), headers=headers, ssl=False, timeout=10) as r:
+            async with session.post(url, data=bytes.fromhex(enc_uid), headers=headers, ssl=False) as r:
                 return r.status
-    except:
+    except Exception as e:
+        print(f"Error in send_request: {e}")
         return None
 
-async def send_likes(uid, force_refresh=False):
-    tokens = await get_tokens(force_refresh)
-    if not tokens:
-        return [], 0
-    
+async def send_likes(uid, tokens):
     enc_uid = encrypt_message(create_like_proto(uid))
-    
-    # Max 10 tokens per request (Vercel timeout)
-    max_tokens = min(len(tokens), 10)
-    
-    tasks = [send_request(enc_uid, token) for token in tokens[:max_tokens]]
-    responses = await asyncio.gather(*tasks)
-    success_count = sum(1 for r in responses if r == 200)
-    
-    # If all requests failed, tokens might be invalid
-    if success_count == 0 and len(tokens) > 0:
-        print("⚠️ All like requests failed, tokens might be invalid")
-        # Force refresh for next request
-        with token_manager['lock']:
-            token_manager['current_batch_tokens'] = []
-    
-    return responses, success_count
+    tasks = [send_request(enc_uid, token) for token in tokens]
+    return await asyncio.gather(*tasks)
 
 # ✅ Main endpoint
 @app.route('/like', methods=['GET'])
@@ -320,124 +264,190 @@ def like_handler():
     
     if not uid:
         return jsonify({"error": "Missing UID"}), 400
-    
+
     try:
-        # Get tokens with auto-generation
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        tokens = loop.run_until_complete(get_tokens(force_refresh))
-        loop.close()
-        
+        # Get tokens
+        tokens = asyncio.run(get_tokens_live(force_refresh))
         if not tokens:
-            return jsonify({
-                "error": "No valid tokens available",
-                "message": "All accounts failed. Auto-retry enabled.",
-                "action": "Try again in a few seconds"
-            }), 401
-        
-        # Get player info
+            return jsonify({"error": "No valid tokens available"}), 401
+
+        # Get player info before likes
         enc_uid = encrypt_message(create_uid_proto(uid))
         before = make_request(enc_uid, tokens[0])
-        
         if not before:
-            return jsonify({
-                "error": "Failed to retrieve player info",
-                "message": "Token might be invalid, auto-refreshing..."
-            }), 500
-        
+            return jsonify({"error": "Failed to retrieve player info"}), 500
+
         before_data = json.loads(MessageToJson(before))
         likes_before = int(before_data.get("AccountInfo", {}).get("Likes", 0))
         nickname = before_data.get("AccountInfo", {}).get("PlayerNickname", "Unknown")
-        level = before_data.get("AccountInfo", {}).get("level", 0)
-        
+
         # Send likes
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        responses, success_count = loop.run_until_complete(send_likes(uid, force_refresh))
-        loop.close()
-        
-        # Get updated info
+        responses = asyncio.run(send_likes(uid, tokens))
+        success_count = sum(1 for r in responses if r == 200)
+
+        # Get player info after likes
         after = make_request(enc_uid, tokens[0])
         likes_after = likes_before
         if after:
             after_data = json.loads(MessageToJson(after))
             likes_after = int(after_data.get("AccountInfo", {}).get("Likes", 0))
-        
-        with token_manager['lock']:
-            batch_info = {
-                "CurrentBatch": token_manager['current_batch_index'],
-                "BatchSize": len(token_manager['current_batch_tokens']),
-                "RequestsUsed": token_manager['request_count'],
-                "MaxRequests": MAX_REQUESTS_PER_BATCH,
-                "RemainingRequests": MAX_REQUESTS_PER_BATCH - token_manager['request_count'],
-                "TotalAccounts": token_manager['total_accounts'],
-                "AutoRefresh": "Enabled"
-            }
+
+        # Get cache info
+        _, batch_info = cache.get_cache()
         
         return jsonify({
             "PlayerNickname": nickname,
             "UID": uid,
-            "Level": level,
             "LikesBefore": likes_before,
             "LikesAfter": likes_after,
             "LikesGivenByAPI": likes_after - likes_before,
             "SuccessfulRequests": success_count,
             "TotalRequests": len(tokens),
-            "BatchInfo": batch_info,
+            "TokensUsed": len(tokens),
+            "BatchInfo": batch_info or {"message": "No batch info"},
+            "CacheStatus": "Active" if cache.is_valid() else "Expired",
+            "NextRefresh": "1 hour",
             "status": 1 if likes_after > likes_before else 2,
             "developer": "semy"
         })
-    
+
+    except Exception as e:
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+# ✅ Cache status endpoint
+@app.route('/cache/status', methods=['GET'])
+def cache_status():
+    if cache.is_valid():
+        _, batch_info = cache.get_cache()
+        return jsonify({
+            "status": "active",
+            "tokens_count": len(cache.tokens),
+            "batch_info": batch_info,
+            "total_accounts": len(cache.all_accounts),
+            "current_position": cache.current_index,
+            "total_cycles": cache.total_cycles,
+            "last_batch_partial": cache.last_batch_was_partial,
+            "cache_duration": f"{CACHE_DURATION} seconds",
+            "auto_refresh": "Active (every 1 hour)",
+            "rotation": f"{BATCH_SIZE} accounts per batch",
+            "memory_usage": "In-Memory (Vercel compatible)"
+        })
+    else:
+        return jsonify({
+            "status": "empty",
+            "message": "No cache found or expired",
+            "total_accounts": len(cache.all_accounts),
+            "next_refresh": "Automatic on next request"
+        })
+
+# ✅ Force refresh endpoint
+@app.route('/cache/refresh', methods=['POST'])
+def refresh_cache():
+    try:
+        tokens = asyncio.run(get_tokens_live(force_refresh=True))
+        if tokens:
+            return jsonify({
+                "status": "success",
+                "tokens_fetched": len(tokens),
+                "message": "Cache refreshed successfully ✅"
+            })
+        else:
+            return jsonify({
+                "status": "error",
+                "message": "Failed to fetch new tokens"
+            }), 500
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# ✅ Batch info endpoint
+@app.route('/batch/info', methods=['GET'])
+def batch_info():
+    total = len(cache.all_accounts)
+    current = cache.current_index
+    batch_num = (current // BATCH_SIZE) + 1
+    total_batches = (total + BATCH_SIZE - 1) // BATCH_SIZE
+    
+    start_idx = current
+    end_idx = min(start_idx + BATCH_SIZE, total)
+    batch_size = end_idx - start_idx
+    
+    # Special logic for next batch
+    next_start = end_idx
+    if next_start >= total:
+        if cache.last_batch_was_partial:
+            next_start = 0  # Wapas se start
+            next_end = min(BATCH_SIZE, total)  # Pehle 5 accounts
+        else:
+            next_start = 0
+            next_end = min(BATCH_SIZE, total)
+    
+    return jsonify({
+        "total_accounts": total,
+        "batch_size": BATCH_SIZE,
+        "current_batch": batch_num,
+        "total_batches": total_batches,
+        "current_index": current,
+        "current_batch_range": f"{start_idx+1}-{end_idx}",
+        "current_batch_size": batch_size,
+        "is_partial_batch": batch_size < BATCH_SIZE,
+        "total_cycles_completed": cache.total_cycles,
+        "next_batch_start": next_start + 1 if next_start < total else 1,
+        "loop_status": "Will restart with first 5 accounts" if (end_idx >= total and cache.last_batch_was_partial) else "Normal continuation",
+        "progress": f"{current}/{total} accounts used"
+    })
+
+# ✅ Home endpoint
 @app.route('/')
 def home():
-    with token_manager['lock']:
-        info = {
-            "status": "online",
-            "message": "Like API with Auto-Token Generation ✅",
-            "features": {
-                "auto_token_generation": "Enabled",
-                "token_validation": "Enabled",
-                "auto_retry": "Enabled",
-                "batch_rotation": "Round-Robin"
-            },
-            "config": {
-                "batch_size": BATCH_SIZE,
-                "max_requests_per_batch": MAX_REQUESTS_PER_BATCH,
-                "batch_expiry_hours": BATCH_EXPIRY_HOURS
-            },
-            "current_status": {
-                "total_accounts": token_manager['total_accounts'],
-                "current_batch_tokens": len(token_manager['current_batch_tokens']),
-                "current_batch_number": token_manager['current_batch_index'],
-                "requests_used": token_manager['request_count'],
-                "requests_remaining": MAX_REQUESTS_PER_BATCH - token_manager['request_count'],
-                "is_generating": token_manager['is_generating']
-            }
+    return jsonify({
+        "status": "online",
+        "message": "Like API with Smart Rotation ✅",
+        "features": {
+            "auto_refresh": "Every 1 hour",
+            "batch_size": f"{BATCH_SIZE} accounts",
+            "total_accounts": len(cache.all_accounts),
+            "rotation": "Smart - 16+5 logic",
+            "cache_type": "In-Memory (Vercel compatible)",
+            "total_cycles": cache.total_cycles
+        },
+        "endpoints": {
+            "/like?uid=XXXX": "Send likes to UID",
+            "/like?uid=XXXX&refresh=true": "Force refresh tokens",
+            "/cache/status": "Check cache status",
+            "/cache/refresh": "Refresh token cache",
+            "/batch/info": "Get batch information"
         }
-    return jsonify(info)
+    })
 
-@app.route('/force-generate', methods=['POST'])
-def force_generate():
-    """Force generate new tokens"""
+# ✅ Initialize cache on startup
+def initialize_cache():
+    load_accounts()
+    print(f"✅ Loaded {len(cache.all_accounts)} total accounts")
+    
+    # Initial token fetch
     try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        tokens = loop.run_until_complete(generate_batch_tokens(force=True))
-        loop.close()
-        
-        return jsonify({
-            "status": "success",
-            "message": f"Generated {len(tokens)} tokens",
-            "tokens": len(tokens)
-        })
+        tokens = asyncio.run(fetch_batch_tokens())
+        if tokens:
+            total = len(cache.all_accounts)
+            current_pos = cache.current_index
+            batch_info = {
+                'batch_number': 1,
+                'total_batches': (total + BATCH_SIZE - 1) // BATCH_SIZE,
+                'accounts_used': len(tokens),
+                'total_accounts': total,
+                'batch_range': f"1-{len(tokens)}",
+                'is_partial': len(tokens) < BATCH_SIZE,
+                'total_cycles_completed': 0,
+                'timestamp': datetime.now().isoformat()
+            }
+            cache.set_cache(tokens, batch_info)
+            print(f"✅ Initial tokens cached: {len(tokens)} tokens")
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        print(f"❌ Initial fetch failed: {e}")
 
-# ✅ Load accounts on startup
-load_accounts()
+# ✅ Initialize on startup
+initialize_cache()
 
+# ✅ For local testing
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=3000)
