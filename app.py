@@ -11,7 +11,7 @@ from threading import Lock
 app = Flask(__name__)
 
 ACCOUNTS_FILE = 'accounts.json'
-BATCH_SIZE = 23
+BATCH_SIZE = 20
 MAX_REQUESTS_PER_BATCH = 30
 BATCH_EXPIRY_HOURS = 2
 
