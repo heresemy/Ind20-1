@@ -23,7 +23,18 @@ TIME_LIMIT_HOURS = 1
 def load_accounts():
     if os.path.exists(ACCOUNTS_FILE):
         with open(ACCOUNTS_FILE, 'r') as f:
-            return json.load(f)
+            data = json.load(f)
+            # Handle both list and dict formats
+            if isinstance(data, list):
+                accounts = {}
+                for item in data:
+                    if isinstance(item, dict) and 'uid' in item and 'password' in item:
+                        accounts[str(item['uid'])] = item['password']
+                    elif isinstance(item, list) and len(item) >= 2:
+                        accounts[str(item[0])] = item[1]
+                return accounts
+            elif isinstance(data, dict):
+                return data
     return {}
 
 # ✅ Load tokens from tokens.json
@@ -42,13 +53,16 @@ def save_tokens(tokens_data):
 async def generate_tokens_for_accounts(account_slice):
     tokens = []
     async with aiohttp.ClientSession() as session:
-        tasks = [fetch_token(session, uid, password) for uid, password in account_slice]
+        tasks = []
+        for uid, password in account_slice.items():
+            tasks.append(fetch_token(session, uid, password))
         results = await asyncio.gather(*tasks)
+        
+        uids = list(account_slice.keys())
         for i, token in enumerate(results):
             if token:
-                uid = list(account_slice.keys())[i]
                 tokens.append({
-                    'uid': uid,
+                    'uid': uids[i],
                     'token': token,
                     'created_at': datetime.now().isoformat(),
                     'request_count': 0
@@ -78,9 +92,12 @@ async def fetch_token(session, uid, password):
 def get_next_token_batch(tokens_data, accounts):
     current_time = datetime.now()
     
-    # Check if tokens need refresh
-    if not tokens_data:
-        # Generate fresh tokens
+    # If no accounts, return empty
+    if not accounts:
+        return []
+    
+    # If no tokens or empty tokens, generate fresh
+    if not tokens_data or not tokens_data.get('tokens'):
         return generate_fresh_tokens(accounts)
     
     # Get current tokens
@@ -102,21 +119,30 @@ def get_next_token_batch(tokens_data, accounts):
         used_accounts = [t['uid'] for t in current_tokens]
         available_accounts = [uid for uid in accounts.keys() if uid not in used_accounts]
         
+        # Get accounts for next batch
         if len(available_accounts) >= TOKENS_PER_BATCH:
             # Take next batch
             next_batch = {uid: accounts[uid] for uid in available_accounts[:TOKENS_PER_BATCH]}
         else:
             # Not enough new accounts, start from beginning
-            remaining = TOKENS_PER_BATCH - len(available_accounts)
             next_batch = {}
+            account_list = list(accounts.items())
+            
             # Add remaining available accounts
             for uid in available_accounts:
                 next_batch[uid] = accounts[uid]
+            
             # Add from beginning to complete batch
-            account_list = list(accounts.items())
+            remaining = TOKENS_PER_BATCH - len(next_batch)
             for i in range(remaining):
-                uid, pwd = account_list[i % len(account_list)]
-                next_batch[uid] = pwd
+                if i < len(account_list):
+                    uid, pwd = account_list[i]
+                    next_batch[uid] = pwd
+                else:
+                    # If still not enough, start from beginning again
+                    idx = i % len(account_list)
+                    uid, pwd = account_list[idx]
+                    next_batch[uid] = pwd
         
         return generate_fresh_tokens(next_batch)
     
@@ -124,6 +150,9 @@ def get_next_token_batch(tokens_data, accounts):
 
 # ✅ Generate fresh tokens for given accounts
 def generate_fresh_tokens(account_slice):
+    if not account_slice:
+        return []
+    
     new_tokens = asyncio.run(generate_tokens_for_accounts(account_slice))
     tokens_data = {
         'tokens': new_tokens,
@@ -287,6 +316,16 @@ def like_handler():
 @app.route('/status', methods=['GET'])
 def status_handler():
     tokens_data = load_tokens()
+    accounts = load_accounts()
+    
+    response = {
+        'total_accounts': len(accounts),
+        'tokens_per_batch': TOKENS_PER_BATCH,
+        'request_limit': REQUEST_LIMIT,
+        'time_limit_hours': TIME_LIMIT_HOURS,
+        'token_status': 'No tokens available'
+    }
+    
     if tokens_data and 'tokens' in tokens_data:
         tokens = tokens_data['tokens']
         token_info = [{
@@ -295,15 +334,14 @@ def status_handler():
             'created_at': t['created_at']
         } for t in tokens]
         
-        return jsonify({
+        response.update({
             'total_tokens': len(tokens),
-            'token_limit_per_batch': TOKENS_PER_BATCH,
-            'request_limit': REQUEST_LIMIT,
-            'time_limit_hours': TIME_LIMIT_HOURS,
+            'token_status': 'Active',
             'tokens': token_info,
             'last_updated': tokens_data.get('last_updated')
         })
-    return jsonify({'status': 'No tokens available'})
+    
+    return jsonify(response)
 
 # ✅ Home endpoint
 @app.route('/')
@@ -315,7 +353,8 @@ def home():
             "/like?uid=YOUR_UID": "Send likes to player",
             "/status": "Check token status"
         },
-        "token_rotation": f"{TOKENS_PER_BATCH} tokens per batch, refresh after {REQUEST_LIMIT} requests or {TIME_LIMIT_HOURS} hour"
+        "token_rotation": f"{TOKENS_PER_BATCH} tokens per batch, refresh after {REQUEST_LIMIT} requests or {TIME_LIMIT_HOURS} hour",
+        "total_accounts": len(load_accounts())
     })
 
 # ✅ Local development
