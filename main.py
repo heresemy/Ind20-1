@@ -19,21 +19,31 @@ TOKENS_PER_BATCH = 21
 REQUEST_LIMIT = 40
 TIME_LIMIT_HOURS = 1
 
-# ✅ Load accounts from accounts.json
+# ✅ Load accounts from accounts.json (supports both formats)
 def load_accounts():
     if os.path.exists(ACCOUNTS_FILE):
         with open(ACCOUNTS_FILE, 'r') as f:
             data = json.load(f)
-            if isinstance(data, dict):
-                return data
-            elif isinstance(data, list):
+            
+            # If data is a list of objects with uid/password
+            if isinstance(data, list):
                 accounts = {}
                 for item in data:
-                    if isinstance(item, dict) and 'uid' in item and 'password' in item:
-                        accounts[str(item['uid'])] = item['password']
+                    if isinstance(item, dict):
+                        # Try to get uid and password from various possible keys
+                        uid = item.get('uid') or item.get('account_id') or item.get('id')
+                        password = item.get('password') or item.get('pass') or item.get('token')
+                        
+                        if uid and password:
+                            accounts[str(uid)] = str(password)
                     elif isinstance(item, list) and len(item) >= 2:
-                        accounts[str(item[0])] = item[1]
+                        accounts[str(item[0])] = str(item[1])
                 return accounts
+            
+            # If data is a dict directly
+            elif isinstance(data, dict):
+                return {str(k): str(v) for k, v in data.items()}
+    
     return {}
 
 # ✅ Load tokens from tokens.json
@@ -387,8 +397,12 @@ def status_handler():
     tokens_data = load_tokens()
     accounts = load_accounts()
     
+    # Show sample accounts (first 5)
+    sample_accounts = list(accounts.keys())[:5] if accounts else []
+    
     response = {
         'total_accounts': len(accounts),
+        'sample_accounts': sample_accounts,
         'tokens_per_batch': TOKENS_PER_BATCH,
         'request_limit': REQUEST_LIMIT,
         'time_limit_hours': TIME_LIMIT_HOURS,
@@ -444,6 +458,7 @@ def test_token(uid):
 # ✅ Home endpoint
 @app.route('/')
 def home():
+    accounts = load_accounts()
     return jsonify({
         "status": "online",
         "message": "Like API is running ✅",
@@ -453,7 +468,8 @@ def home():
             "/test/UID": "Test token generation for specific UID"
         },
         "token_rotation": f"{TOKENS_PER_BATCH} tokens per batch, refresh after {REQUEST_LIMIT} requests or {TIME_LIMIT_HOURS} hour",
-        "total_accounts": len(load_accounts())
+        "total_accounts": len(accounts),
+        "sample_accounts": list(accounts.keys())[:3] if accounts else []
     })
 
 # ✅ Local development
