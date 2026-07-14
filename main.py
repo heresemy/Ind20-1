@@ -15,7 +15,7 @@ app = Flask(__name__)
 
 ACCOUNTS_FILE = 'accounts.json'
 TOKENS_FILE = 'tokens.json'
-TOKENS_PER_BATCH = 21
+TOKENS_PER_BATCH = 21  # ✅ Sirf 21 tokens per hit
 REQUEST_LIMIT = 40
 TIME_LIMIT_HOURS = 1
 
@@ -146,7 +146,7 @@ async def generate_tokens_for_accounts(account_slice):
     
     return tokens
 
-# ✅ Get next batch of tokens (rotation logic)
+# ✅ Get next batch of tokens (rotation logic) - FIXED
 def get_next_token_batch(tokens_data, accounts):
     current_time = datetime.now()
     
@@ -154,17 +154,23 @@ def get_next_token_batch(tokens_data, accounts):
         print("❌ No accounts available")
         return []
     
-    # If no tokens or empty tokens, generate fresh
+    # If no tokens or empty tokens, generate fresh with TOKENS_PER_BATCH only
     if not tokens_data or not tokens_data.get('tokens'):
-        print("🔄 Generating fresh tokens...")
-        return generate_fresh_tokens(accounts)
+        print(f"🔄 Generating fresh {TOKENS_PER_BATCH} tokens...")
+        # ✅ Take only first TOKENS_PER_BATCH accounts
+        account_slice = {}
+        account_list = list(accounts.items())
+        for i in range(min(TOKENS_PER_BATCH, len(account_list))):
+            uid, pwd = account_list[i]
+            account_slice[uid] = pwd
+        return generate_fresh_tokens(account_slice)
     
     # Get current tokens
     current_tokens = tokens_data.get('tokens', [])
     
-    # Check if any token needs refresh
+    # Check if any token needs refresh (only check active batch)
     needs_refresh = False
-    for token_info in current_tokens:
+    for token_info in current_tokens[:TOKENS_PER_BATCH]:
         try:
             created_time = datetime.fromisoformat(token_info['created_at'])
             time_diff = current_time - created_time
@@ -178,39 +184,38 @@ def get_next_token_batch(tokens_data, accounts):
             break
     
     if needs_refresh:
-        # Get next batch of accounts (rotation)
+        # ✅ Get next batch of exactly TOKENS_PER_BATCH accounts
         used_accounts = [t['uid'] for t in current_tokens]
         available_accounts = [uid for uid in accounts.keys() if uid not in used_accounts]
         
         print(f"📊 Used accounts: {len(used_accounts)}, Available: {len(available_accounts)}")
         
-        # Get accounts for next batch
-        if len(available_accounts) >= TOKENS_PER_BATCH:
-            next_batch = {uid: accounts[uid] for uid in available_accounts[:TOKENS_PER_BATCH]}
-        else:
-            # Not enough new accounts, start from beginning
-            next_batch = {}
-            account_list = list(accounts.items())
-            
-            # Add remaining available accounts
-            for uid in available_accounts:
-                next_batch[uid] = accounts[uid]
-            
-            # Add from beginning to complete batch
+        next_batch = {}
+        account_list = list(accounts.items())
+        
+        # Take from available accounts
+        for uid in available_accounts[:TOKENS_PER_BATCH]:
+            next_batch[uid] = accounts[uid]
+        
+        # Fill remaining from beginning if needed
+        if len(next_batch) < TOKENS_PER_BATCH:
             remaining = TOKENS_PER_BATCH - len(next_batch)
             for i in range(remaining):
                 if i < len(account_list):
                     uid, pwd = account_list[i]
-                    next_batch[uid] = pwd
+                    if uid not in next_batch:
+                        next_batch[uid] = pwd
                 else:
                     idx = i % len(account_list)
                     uid, pwd = account_list[idx]
-                    next_batch[uid] = pwd
+                    if uid not in next_batch:
+                        next_batch[uid] = pwd
         
-        print(f"🔄 Generating new batch with {len(next_batch)} accounts...")
+        print(f"🔄 New batch: {len(next_batch)} accounts")
         return generate_fresh_tokens(next_batch)
     
-    return current_tokens
+    # ✅ Return only TOKENS_PER_BATCH tokens
+    return current_tokens[:TOKENS_PER_BATCH]
 
 # ✅ Generate fresh tokens for given accounts
 def generate_fresh_tokens(account_slice):
@@ -422,10 +427,11 @@ def status_handler():
             'uid': t['uid'],
             'requests_used': t.get('request_count', 0),
             'created_at': t['created_at']
-        } for t in tokens]
+        } for t in tokens[:TOKENS_PER_BATCH]]  # ✅ Show only active batch
         
         response.update({
             'total_tokens': len(tokens),
+            'active_tokens': min(TOKENS_PER_BATCH, len(tokens)),
             'token_status': 'Active',
             'tokens': token_info,
             'last_updated': tokens_data.get('last_updated')
@@ -462,6 +468,89 @@ def test_token(uid):
             "message": "Failed to get token"
         }), 400
 
+# ✅ Debug endpoint - Check single like
+@app.route('/debug/like', methods=['GET'])
+def debug_like():
+    uid = request.args.get("uid")
+    if not uid:
+        return jsonify({"error": "Missing UID"}), 400
+    
+    try:
+        accounts = load_accounts()
+        tokens_data = load_tokens()
+        
+        if not tokens_data or 'tokens' not in tokens_data:
+            return jsonify({"error": "No tokens available"}), 401
+        
+        # Use first token only
+        token = tokens_data['tokens'][0]['token']
+        
+        # Test encryption
+        enc_uid = encrypt_message(create_like_proto(uid))
+        
+        # Send single like
+        status = asyncio.run(send_request(enc_uid, token))
+        
+        # Get player info
+        enc_uid_info = encrypt_message(create_uid_proto(uid))
+        before = make_request(enc_uid_info, token)
+        
+        if before:
+            before_data = json.loads(MessageToJson(before))
+            likes = int(before_data.get("AccountInfo", {}).get("Likes", 0))
+            nickname = before_data.get("AccountInfo", {}).get("PlayerNickname", "Unknown")
+            
+            return jsonify({
+                "target_uid": uid,
+                "nickname": nickname,
+                "current_likes": likes,
+                "like_status": status,
+                "token_used": token[:30] + "...",
+                "message": "Success" if status == 200 else f"Failed with status: {status}"
+            })
+        
+        return jsonify({"error": "Failed to get player info"}), 500
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# ✅ Check token validity
+@app.route('/debug/token/<uid>', methods=['GET'])
+def debug_token(uid):
+    accounts = load_accounts()
+    if uid not in accounts:
+        return jsonify({"error": "UID not found"}), 404
+    
+    password = accounts[uid]
+    
+    async def check():
+        async with aiohttp.ClientSession() as session:
+            # Get token
+            token = await fetch_token(session, uid, password)
+            if not token:
+                return {"error": "Failed to get token"}
+            
+            # Test token with player info (using a test UID)
+            test_uid = "1818702159"  # Change this to any UID
+            enc_uid = encrypt_message(create_uid_proto(test_uid))
+            result = make_request(enc_uid, token)
+            
+            if result:
+                data = json.loads(MessageToJson(result))
+                return {
+                    "token_valid": True,
+                    "player_info": {
+                        "nickname": data.get("AccountInfo", {}).get("PlayerNickname"),
+                        "likes": data.get("AccountInfo", {}).get("Likes"),
+                        "level": data.get("AccountInfo", {}).get("Level")
+                    }
+                }
+            else:
+                return {"token_valid": False, "error": "Token failed to get player info"}
+    
+    result = asyncio.run(check())
+    return jsonify(result)
+
 # ✅ Home endpoint
 @app.route('/')
 def home():
@@ -470,9 +559,11 @@ def home():
         "status": "online",
         "message": "Like API is running ✅",
         "endpoints": {
-            "/like?uid=YOUR_UID": "Send likes to player",
+            "/like?uid=YOUR_UID": "Send likes to player (21 likes per hit)",
             "/status": "Check token status",
-            "/test/UID": "Test token generation for specific UID"
+            "/test/UID": "Test token generation for specific UID",
+            "/debug/like?uid=UID": "Send single like for testing",
+            "/debug/token/UID": "Check token validity"
         },
         "token_rotation": f"{TOKENS_PER_BATCH} tokens per batch, refresh after {REQUEST_LIMIT} requests or {TIME_LIMIT_HOURS} hour",
         "total_accounts": len(accounts),
