@@ -60,7 +60,7 @@ def save_tokens(tokens_data):
 
 # ✅ Fetch token from API - Updated for new response format
 async def fetch_token(session, uid, password):
-    url = f"https://jwtmc.vercel.app/token?uid={uid}&password={password}"
+    url = f"https://railjwt-production.up.railway.app/semy?uid={uid}&password={password}"
     try:
         async with session.get(url, timeout=15) as res:
             if res.status == 200:
@@ -68,29 +68,36 @@ async def fetch_token(session, uid, password):
                 try:
                     data = json.loads(text)
                     
-                    # Check if success is true and token exists
+                    # Check new API response format
                     if data.get('success') == True:
-                        if 'token' in data:
-                            return data['token']
-                        elif 'data' in data and 'token' in data['data']:
-                            return data['data']['token']
+                        # Direct jwt field
+                        if 'jwt' in data:
+                            return data['jwt']
+                        
+                        # Nested jwt field
+                        if 'data' in data and isinstance(data['data'], dict):
+                            if 'jwt' in data['data']:
+                                return data['data']['jwt']
+                    
+                    # Fallback: Check for token in any format
+                    if isinstance(data, dict):
+                        # Check common token field names
+                        for key in ['jwt', 'token', 'Token', 'access_token', 'accessToken']:
+                            if key in data:
+                                return data[key]
+                        
+                        # Check nested data
+                        if 'data' in data and isinstance(data['data'], dict):
+                            for key in ['jwt', 'token', 'Token', 'access_token', 'accessToken']:
+                                if key in data['data']:
+                                    return data['data'][key]
                     
                     # Handle list response format
                     if isinstance(data, list) and len(data) > 0:
-                        if "token" in data[0]:
-                            return data[0]["token"]
-                        elif "Token" in data[0]:
-                            return data[0]["Token"]
-                    
-                    # Handle dict response format
-                    elif isinstance(data, dict):
-                        if "token" in data:
-                            return data["token"]
-                        elif "Token" in data:
-                            return data["Token"]
-                        elif "data" in data and isinstance(data["data"], dict):
-                            if "token" in data["data"]:
-                                return data["data"]["token"]
+                        if isinstance(data[0], dict):
+                            for key in ['jwt', 'token', 'Token']:
+                                if key in data[0]:
+                                    return data[0][key]
                     
                     return None
                     
@@ -469,7 +476,8 @@ def home():
         },
         "token_rotation": f"{TOKENS_PER_BATCH} tokens per batch, refresh after {REQUEST_LIMIT} requests or {TIME_LIMIT_HOURS} hour",
         "total_accounts": len(accounts),
-        "sample_accounts": list(accounts.keys())[:3] if accounts else []
+        "sample_accounts": list(accounts.keys())[:3] if accounts else [],
+        "jwt_api": "https://railjwt-production.up.railway.app/semy"
     })
 
 # ✅ Local development
