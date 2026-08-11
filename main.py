@@ -388,15 +388,11 @@ def like_handler():
         return jsonify({
             "PlayerNickname": nickname,
             "UID": uid,
-            "LikesBefore": likes_before,
-            "LikesAfter": likes_after,
+            "LikesBeforecommand": likes_before,
+            "LikesAftercommmand": likes_after,
             "LikesGivenByAPI": likes_after - likes_before,
-            "SuccessfulRequests": success_count,
-            "TotalRequests": len(tokens),
-            "TokensUsed": len(tokens),
             "status": 1 if likes_after > likes_before else 2,
-            "developer": "semy",
-            "token_rotation": "Active"
+            "developer": "@semy_yy"
         })
     
     except Exception as e:
@@ -559,16 +555,7 @@ def home():
         "status": "online",
         "message": "Like API is running ✅",
         "endpoints": {
-            "/like?uid=YOUR_UID": "Send likes to player (21 likes per hit)",
-            "/status": "Check token status",
-            "/test/UID": "Test token generation for specific UID",
-            "/debug/like?uid=UID": "Send single like for testing",
-            "/debug/token/UID": "Check token validity"
-        },
-        "token_rotation": f"{TOKENS_PER_BATCH} tokens per batch, refresh after {REQUEST_LIMIT} requests or {TIME_LIMIT_HOURS} hour",
-        "total_accounts": len(accounts),
-        "sample_accounts": list(accounts.keys())[:3] if accounts else [],
-        "jwt_api": "https://railjwt-production.up.railway.app/semy"
+            "/like?uid=YOUR_UID"
     })
 
 # ✅ Local development
