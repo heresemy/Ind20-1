@@ -555,7 +555,7 @@ def home():
         "status": "online",
         "message": "Like API is running ✅",
         "endpoints": {
-            "/like?uid=YOUR_UID"
+            ""/like?uid=YOUR_UID": "Send likes to a player"
     })
 
 # ✅ Local development
